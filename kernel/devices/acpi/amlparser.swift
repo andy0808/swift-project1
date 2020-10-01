@@ -2,16 +2,16 @@
  * kernel/devices/acpi/amlparser.swift
  *
  * Created by Simon Evans on 05/07/2016.
- * Copyright © 2016, 2017 Simon Evans. All rights reserved.
+ * Copyright © 2016 - 2019 Simon Evans. All rights reserved.
  *
  * AML Parser
  */
 
 
-typealias AMLByteBuffer = UnsafeBufferPointer<UInt8>
+typealias AMLByteBuffer = UnsafeRawBufferPointer
 
 #if TEST
-private func hexDump(buffer: UnsafeBufferPointer<UInt8>) {
+private func hexDump(buffer: UnsafeRawBufferPointer) {
 
     func byteAsChar(value: UInt8) -> Character {
         if value >= 0x21 && value <= 0x7e {
@@ -132,13 +132,10 @@ struct AMLByteStream {
     }
 
     func dump() {
-        #if TEST
-        let length = bytesRemaining
-        buffer.baseAddress!.withMemoryRebound(to: UInt8.self, capacity: length, {
-            hexDump(buffer: UnsafeBufferPointer<UInt8>(start: $0.advanced(by: position),
-                                                       count: length))
-        })
-        #endif
+#if TEST
+        hexDump(buffer: UnsafeRawBufferPointer(start: buffer.baseAddress!.advanced(by: position),
+                                               count: bytesRemaining))
+#endif
     }
 
     mutating func substreamOf(length: Int) throws -> AMLByteStream {
@@ -172,12 +169,14 @@ final class AMLParser {
     }
     private var byteStream: AMLByteStream!
     private var currentScope: AMLNameString
-    let acpiGlobalObjects: ACPIGlobalObjects
+    let acpiGlobalObjects: ACPI.ACPIObjectNode
+    let isParsingMethod: Bool
 
 
-    init(globalObjects: ACPIGlobalObjects) {
+    init(globalObjects: ACPI.ACPIObjectNode) {
         currentScope = AMLNameString(String(AMLNameString.rootChar))
         acpiGlobalObjects = globalObjects
+        isParsingMethod = false
     }
 
 
@@ -187,25 +186,29 @@ final class AMLParser {
     }
 
 
-    private func subParser() throws -> AMLParser {
+    private func subParser(parsingMethod: Bool = false) throws -> AMLParser {
         //byteStream.dump()
         let curPos = byteStream.position
         let pkgLength = try parsePkgLength()
         let bytesRead = byteStream.position - curPos
         let byteCount = Int(pkgLength) - bytesRead
         let stream = try byteStream.substreamOf(length: byteCount)
-        let parser = AMLParser(byteStream: stream, scope: currentScope,
-                               globalObjects: acpiGlobalObjects)
+        let parser = AMLParser(byteStream: stream,
+                               scope: currentScope,
+                               globalObjects: acpiGlobalObjects,
+                               parsingMethod: parsingMethod
+        )
         return parser
     }
 
 
     // Called by subParser
     private init(byteStream: AMLByteStream, scope: AMLNameString,
-                 globalObjects: ACPIGlobalObjects) {
+                 globalObjects: ACPI.ACPIObjectNode, parsingMethod: Bool) {
         self.byteStream = byteStream
         self.currentScope = scope
         self.acpiGlobalObjects = globalObjects
+        self.isParsingMethod = parsingMethod
     }
 
 
@@ -331,62 +334,75 @@ final class AMLParser {
     private func parseObjectList() throws -> AMLObjectList {
         var objectList: [AMLObject] = []
         for obj in try parseTermList() {
-            guard let amlObj = obj as? AMLObject else {
+            if let amlObj = obj as? AMLObject {
+                objectList.append(amlObj)
+            } else if let amlObj = obj as? AMLDefField {
+                objectList.append(contentsOf: amlObj.fields)
+            } else if let amlObj = obj as? AMLDefIndexField {
+                objectList.append(contentsOf: amlObj.fields)
+            } else {
                 fatalError("\(obj) is not an AMLObject")
             }
-            objectList.append(amlObj)
         }
         return objectList
     }
 
 
-    private func parseFieldList(fieldRef: AMLDefFieldRef) throws -> AMLFieldList {
+    private func parseFieldList(fieldFlags: AMLFieldFlags) throws -> AMLFieldList {
         var bitOffset: UInt = 0
         var fieldList: AMLFieldList = []
 
-        func parseFieldElement() throws -> AMLFieldElement? {
-            guard let byte = byteStream.nextByte() else {
-                return nil // end of stream
-            }
-            switch byte {
-            case 0x00:
-                let pkgLength = try parsePkgLength()
-                bitOffset += pkgLength
-                return AMLReservedField(pkglen: pkgLength)
+        var accessField = AMLAccessField(type: AMLAccessType(value: 0), attrib: 0)
+        var extendedAccessField: AMLExtendedAccessField? = nil
 
-            case 0x01:
-                let type = try AMLAccessType(value: nextByte())
-                let attrib = try nextByte()
-                return AMLAccessField(type: type, attrib: attrib)
+        func parseFieldElement() throws -> (AMLNameString, AMLFieldSettings)? {
+            while let byte = byteStream.nextByte() {
+                switch byte {
+                    case 0x00:
+                        let pkgLength = try parsePkgLength()
+                        bitOffset += pkgLength
+                        //return AMLReservedField(pkglen: pkgLength)
 
-            case 0x02: //ConnectField
-                throw AMLError.unimplemented()
-                /*
-                 case 0x03:
-                 let type = try AMLAccessType(value: nextByte())
-                 guard let attrib = try AMLExtendedAccessAttrib(rawValue: nextByte()) else {
-                 let r = "Bad AMLExtendedAccessAttrib byte: \(byte)"
-                 throw AMLError.invalidData(reason: r)
-                 }
-                 let length = try AMLByteConst(nextByte())
-                 return AMLExtendedAccessField(type: type, attrib: attrib, length: length)
-                 */
-            default:
-                if let ch = AMLCharSymbol(byte: byte), ch.charType == .leadNameChar {
-                    let name = try AMLNameString(parseNameSeg(1, startingWith: String(ch.character)))
-                    let bitWidth = try parsePkgLength()
-                    if name == "" || name == "    " {
-                        return nil
-                    }
-                    let field = try AMLNamedField(name: name, bitOffset: bitOffset,
-                                                  bitWidth: bitWidth, fieldRef: fieldRef)
-                    try addGlobalObject(name: resolveNameToCurrentScope(path: name),
-                                        object: field)
-                    bitOffset += bitWidth
-                    return field
+                    case 0x01:
+                        let type = try AMLAccessType(value: nextByte())
+                        let attrib = try nextByte()
+                        accessField = AMLAccessField(type: type, attrib: attrib)
+
+                    case 0x02: //ConnectField
+                        throw AMLError.unimplemented()
+
+                    case 0x03:
+                        let type = try AMLAccessType(value: nextByte())
+                        guard let attrib = try AMLExtendedAccessAttrib(rawValue: nextByte()) else {
+                            let r = "Bad AMLExtendedAccessAttrib byte: \(byte)"
+                            throw AMLError.invalidData(reason: r)
+                        }
+                        let length = try AMLByteConst(nextByte())
+                        extendedAccessField =  AMLExtendedAccessField(type: type, attrib: attrib, length: length.value)
+                        throw AMLError.unimplemented()
+
+                    default:
+                        if let ch = AMLCharSymbol(byte: byte), ch.charType == .leadNameChar {
+                            let name = try AMLNameString(parseNameSeg(1, startingWith: String(ch.character)))
+                            let bitWidth = try parsePkgLength()
+                            if name == "" || name == "    " {
+                                bitOffset += bitWidth
+                                continue
+                            }
+                            let fieldSettings = AMLFieldSettings(
+                                bitOffset: bitOffset,
+                                bitWidth: bitWidth, // fieldRef: fieldRef,
+                                fieldFlags: fieldFlags,
+                                accessField: accessField,
+                                extendedAccessField: extendedAccessField
+                            )
+                            bitOffset += bitWidth
+                            return (name, fieldSettings)
+                        }
+                        throw AMLError.invalidData(reason: "Bad byte: \(byte)")
                 }
-                throw AMLError.invalidData(reason: "Bad byte: \(byte)")
             }
+            return nil
         }
 
         while let element = try parseFieldElement() {
@@ -447,7 +463,7 @@ final class AMLParser {
 
     private func parseTermArgAsInteger() throws -> AMLInteger {
         let arg = try parseTermArg()
-        var context = ACPI.AMLExecutionContext(scope: currentScope, args: [], globalObjects: acpiGlobalObjects)
+        var context = ACPI.AMLExecutionContext(scope: currentScope)
         guard let integerData = arg.evaluate(context: &context) as? AMLIntegerData else {
             throw AMLError.invalidData(reason: "Cant convert \(type(of: arg)) to integer")
         }
@@ -491,7 +507,7 @@ final class AMLParser {
         case .loadOp:       return try parseDefLoad()
         case .noopOp:       return AMLDefNoop()
         case .notifyOp:     return try parseDefNotify()
-        case .releaseOp:    return try AMLDefRelease(object: parseSuperName())
+        case .releaseOp:    return try AMLDefRelease(mutex: parseSuperName())
         case .resetOp:      return try AMLDefReset(object: parseSuperName())
         case .returnOp:     return try AMLDefReturn(object: parseTermArg())
         case .signalOp:     return try AMLDefSignal(object: parseSuperName())
@@ -586,7 +602,6 @@ final class AMLParser {
         case .oneOp:    return AMLOneOp()
         case .onesOp:   return AMLOnesOp()
 
-
         case .aliasOp: return try parseDefAlias()
         case .nameOp: return try parseDefName()
         case .scopeOp: return try parseDefScope()
@@ -632,7 +647,7 @@ final class AMLParser {
             throw AMLError.invalidMethod(reason: r)
         }
 
-        guard let method = object.object as? AMLMethod else {
+        guard let method = object as? AMLMethod else {
             throw AMLError.invalidMethod(reason: "\(name.value) is not a Method")
         }
         var args: AMLTermArgList = []
@@ -759,10 +774,9 @@ final class AMLParser {
     private func determineIfMethodOrName(name: AMLNameString) throws -> Bool {
         if let (obj, _) = acpiGlobalObjects.getGlobalObject(currentScope: currentScope,
                                                             name: name),
-            let _ = obj.object as? AMLMethod {
-                    return true
-            }
-
+            obj is AMLMethod{
+                return true
+        }
         return false
     }
 
@@ -773,7 +787,10 @@ final class AMLParser {
     }
 
 
-    func addGlobalObject(name: AMLNameString, object: AMLObject) throws { // FIXME: object should be AMLNamedObhj or AMLDataRefObject
+    func addGlobalObject(name: AMLNameString, object: AMLNamedObj) throws {
+        guard !isParsingMethod else {
+            return
+        }
         let nameStr = name.value
         guard let ch = nameStr.first,
             ch == AMLNameString.rootChar else {
@@ -813,7 +830,7 @@ final class AMLParser {
         let parser = try subParser()
         let bufSize = try parser.parseTermArg()
         let bytes = parser.byteStream.bytesToEnd()
-        return AMLBuffer(size: bufSize, value: bytes)
+        return AMLBuffer(size: bufSize, data: bytes)
     }
 
 
@@ -844,21 +861,25 @@ final class AMLParser {
 
     private func parseDefIndexField() throws -> AMLDefIndexField {
         let parser = try subParser()
-        let fieldRef = AMLDefFieldRef()
+      //  let fieldRef = AMLDefFieldRef()
 
-        let result = try AMLDefIndexField(
-            name: parser.parseNameString(),
-            dataName: parser.parseNameString(),
-            flags: AMLFieldFlags(flags: parser.nextByte()),
-            fields: parser.parseFieldList(fieldRef: fieldRef))
-        // FIXME
-        //fieldRef.amlDefField = result
-        return result
+        let indexName = try parser.parseNameString()
+        let dataName = try parser.parseNameString()
+        let flags = try AMLFieldFlags(flags: parser.nextByte())
+
+        var fields: [AMLNamedObj] = []
+        for (name, settings) in try parser.parseFieldList(fieldFlags: flags) {
+            let field = AMLNamedIndexField(name: name, indexField: indexName, dataField: dataName, fieldSettings: settings)
+            try addGlobalObject(name: resolveNameToCurrentScope(path: name), object: field)
+            fields.append(field)
+        }
+
+        return AMLDefIndexField(indexName: indexName, dataName: dataName, flags: flags, fields: fields)
     }
 
 
     private func parseDefMethod() throws -> AMLMethod {
-        let parser = try subParser()
+        let parser = try subParser(parsingMethod: true)
         let name = try parser.parseNameString()
         let fullPath = resolveNameToCurrentScope(path: name)
         parser.currentScope = fullPath
@@ -961,12 +982,20 @@ final class AMLParser {
 
     private func parseDefField() throws -> AMLDefField {
         let parser = try subParser()
-        let name = try parser.parseNameString()
+        let regionName = try parser.parseNameString()
         let flags = try AMLFieldFlags(flags: parser.nextByte())
-        let fieldRef = AMLDefFieldRef()
-        let fields = try parser.parseFieldList(fieldRef: fieldRef)
-        let field = AMLDefField(name: name, flags: flags, fields: fields)
-        fieldRef.amlDefField = field
+        //let fieldRef = AMLDefFieldRef()
+
+        var fields: [AMLNamedField] = []
+        for (name, settings) in try parser.parseFieldList(fieldFlags: flags) {
+            let field = AMLNamedField(name: name, regionName: regionName, fieldSettings: settings)
+            try addGlobalObject(name: resolveNameToCurrentScope(path: name), object: field)
+            fields.append(field)
+        }
+
+        let field = AMLDefField(regionName: regionName, flags: flags, fields: fields)
+        //fieldRef.amlDefField = field
+
         return field
     }
 
@@ -978,7 +1007,6 @@ final class AMLParser {
             throw AMLError.invalidData(reason: "Bad AMLRegionSpace: \(byte)")
         }
 
-        //var context = ACPI.AMLExecutionContext(scope: currentScope, args: [], globalObjects: acpiGlobalObjects)
         let offset = try parseTermArg()
         let length = try parseTermArg()
 
@@ -1494,7 +1522,12 @@ final class AMLParser {
                 name.remove(at: name.index(before: name.endIndex))
             }
         }
-        return name
+        // FIXME: This is a hack to work around the fact that String.remove(at:)
+        // will return allocated UTF8 string even if the source was an ASCII SSO
+        // which causes problems with Unicode normalisation later on.
+        var name2 = ""
+        for ch in name { name2 += String(ch) }
+        return name2
     }
 
 

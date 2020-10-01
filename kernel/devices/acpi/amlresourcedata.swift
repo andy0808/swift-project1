@@ -2,7 +2,7 @@
 //  kernel/devices/acpi/amlresourcedata.swift
 //
 //  Created by Simon Evans on 02/12/2017.
-//  Copyright © 2017 Simon Evans. All rights reserved.
+//  Copyright © 2017 - 2019 Simon Evans. All rights reserved.
 //
 //  Current Resource Settings (_CRS) decoding.
 
@@ -105,9 +105,9 @@ struct AMLIOPortSetting: AMLResourceSetting {
         precondition(buffer.count == 7)
 
         if buffer[0] == 0 {
-            decodes16Bit = true
-        } else if buffer[0] == 1 {
             decodes16Bit = false
+        } else if buffer[0] == 1 {
+            decodes16Bit = true
         } else {
             fatalError("Invalid byte0 for IOPort: \(buffer[0])")
         }
@@ -117,12 +117,11 @@ struct AMLIOPortSetting: AMLResourceSetting {
         rangeLength = buffer[6]
     }
 
-    func ioPorts() -> [UInt16] {
-        var ports: [UInt16] = []
-        for port in minimumBaseAddress...maximumBaseAddress {
-            ports.append(port)
-        }
-        return ports
+    func ioPorts() -> ClosedRange<UInt16> {
+        let mask: UInt16 = decodes16Bit ? 0xffff : 0x03ff
+        let start = minimumBaseAddress & mask
+        let end = (minimumBaseAddress + UInt16(rangeLength - 1)) & mask
+        return start...end
     }
 }
 
@@ -221,9 +220,9 @@ struct AMLWordAddressSpaceDescriptor: AMLResourceSetting {
         addressRangeMaximum = UInt16(withBytes: buffer[7], buffer[8])
         addressTranslationOffet = UInt16(withBytes: buffer[9], buffer[10])
         addressLength = UInt16(withBytes: buffer[11], buffer[12])
-        if buffer.count > 13 {
+        if buffer.count > 17 { // buffer may have extra data or be incomplete so check there is enough
             resourceSourceIndex = buffer[13]
-            fatalError("") //resourceSource = AMLNameString(value: "") // FIXME
+            resourceSource = AMLNameString(buffer: buffer[14...17])
         } else {
             resourceSourceIndex = nil
             resourceSource = nil
@@ -266,9 +265,9 @@ struct AMLDWordAddressSpaceDescriptor: AMLResourceSetting {
         addressRangeMaximum = UInt32(withBytes: buffer[11], buffer[12], buffer[13], buffer[14])
         addressTranslationOffet = UInt32(withBytes: buffer[15], buffer[16], buffer[17], buffer[18])
         addressLength = UInt32(withBytes: buffer[19], buffer[20], buffer[21], buffer[22])
-        if buffer.count > 23 {
+        if buffer.count > 27 {
             resourceSourceIndex = buffer[23]
-            fatalError("") //resourceSource = AMLNameString(value: "") // FIXME
+            resourceSource = AMLNameString(buffer: buffer[24...27])
         } else {
             resourceSourceIndex = nil
             resourceSource = nil
@@ -312,16 +311,15 @@ struct AMLQWordAddressSpaceDescriptor: AMLResourceSetting {
         addressRangeMaximum = UInt64(withBytes: Array(buffer[19...26]))
         addressTranslationOffet = UInt64(withBytes: Array(buffer[27...34]))
         addressLength = UInt64(withBytes: Array(buffer[35...42]))
-        if buffer.count > 43 {
+        if buffer.count > 47 {
             resourceSourceIndex = buffer[43]
-            fatalError("") //resourceSource = AMLNameString(value: "") // FIXME
+            resourceSource = AMLNameString(buffer: buffer[44...47])
         } else {
             resourceSourceIndex = nil
             resourceSource = nil
         }
     }
 }
-
 
 
 func decodeResourceData(_ buffer: AMLBuffer) -> [AMLResourceSetting] {
@@ -333,8 +331,8 @@ func decodeResourceData(_ buffer: AMLBuffer) -> [AMLResourceSetting] {
     var settings: [AMLResourceSetting] = []
 
     var idx = 0
-    while idx < buffer.value.count {
-        let header = BitArray8(buffer.value[idx])
+    while idx < buffer.data.count {
+        let header = BitArray8(buffer.data[idx])
         idx += 1
         let setting: AMLResourceSetting
         let length: Int
@@ -346,10 +344,10 @@ func decodeResourceData(_ buffer: AMLBuffer) -> [AMLResourceSetting] {
                 fatalError("Invalid AMLLargeItemName: \(itemName)")
             }
 
-            assert(idx + 2 < buffer.value.count)
-            length = Int(UInt16(withBytes: buffer.value[idx], buffer.value[idx+1]))
+            assert(idx + 2 < buffer.data.count)
+            length = Int(UInt16(withBytes: buffer.data[idx], buffer.data[idx+1]))
             idx += 2
-            let buf = AMLByteList(buffer.value[idx..<idx + length])
+            let buf = AMLByteList(buffer.data[idx..<idx + length])
 
             switch type {
             case .memoryRangeDescriptor32Bit:               setting = AMLMemoryRangeDescriptor(buf)
@@ -368,7 +366,7 @@ func decodeResourceData(_ buffer: AMLBuffer) -> [AMLResourceSetting] {
                 fatalError("Invalid AMLSmallItemnName: \(itemName)")
             }
             length = Int(header[0...2])
-            let buf = AMLByteList(buffer.value[idx..<idx + length])
+            let buf = AMLByteList(buffer.data[idx..<idx + length])
 
             switch type {
             case .irqFormatDescriptor:  setting = AMLIrqSetting(buf)

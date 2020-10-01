@@ -134,12 +134,13 @@ func setupMM(bootParams: BootParams) {
         physStart: stackPhys, readWrite: true, noExec: true)
 
     // Add mapping for the symbol and string tables after the stack
-    let symbolSize = bootParams.symbolTableSize + bootParams.stringTableSize
-    if symbolSize > 0 {
-        let symtabPhys = (stackPhys + stackHeapSize + PAGE_SIZE).pageAddress(pageSize: PAGE_SIZE, roundUp: true).address
-        addMapping(start: bootParams.symbolTablePtr.address,
-            size: UInt(symbolSize), physStart: symtabPhys,
-            readWrite: true, noExec: true)
+
+    if let symbolTablePtr = bootParams.symbolTablePtr,
+        bootParams.symbolTableSize > 0 && bootParams.stringTableSize > 0 {
+            let symtabPhys = (stackPhys + stackHeapSize + PAGE_SIZE).pageAddress(pageSize: PAGE_SIZE, roundUp: true)
+            addMapping(start: symbolTablePtr.address,
+                size: UInt(bootParams.symbolTableSize + bootParams.stringTableSize),
+                physStart: symtabPhys, readWrite: true, noExec: true)
     }
 
     printf("MM: Physical address of kernelBase     (%p): (%p)\n",
@@ -213,12 +214,12 @@ private func getPageAtIndex(_ dirPage: PageTableDirectory, _ idx: Int)
     -> PageTableDirectory {
     if !pagePresent(dirPage[idx]) {
         let newPage = alloc(pages: 1)
-        memset(newPage, 0, Int(PAGE_SIZE))
-        let paddr = virtualToPhys(address: newPage.address)
+        newPage.rawBufferPointer.initializeMemory(as: UInt8.self, repeating: 0)
+        let paddr = newPage.address
         let entry = makePDE(address: paddr, readWrite: true, userAccess: false,
             writeThrough: true, cacheDisable: false, noExec: false)
         dirPage[idx] = entry
-        return pageTableBuffer(virtualAddress: newPage.address)
+        return pageTableBuffer(virtualAddress: paddr.vaddr)
     }
 
     let paddr = PhysAddress(dirPage[idx] & 0x0000fffffffff000)
@@ -311,6 +312,7 @@ private func add1GBMapping(_ addr: VirtualAddress, physAddress: PhysAddress) {
         let entry = makePTE(address: physAddress, readWrite: true,
             userAccess: false, writeThrough: true, cacheDisable: false,
             global: false, noExec: true, largePage: true, PAT: false)
+        printf("1GB Mapping entry: %16.16llx\n", entry);
         pdpPage[idx1] = entry
     } else {
         koops("MM: 1GB mapping cant be added, already present")

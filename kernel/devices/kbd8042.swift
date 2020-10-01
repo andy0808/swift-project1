@@ -177,7 +177,8 @@ final class KBD8042: Device, ISADevice, CustomStringConvertible {
     var description: String { return "KBD8042" }
 
     required init?(interruptManager: InterruptManager, pnpName: String,
-          resource: ISABus.Resources) {
+        resources: ISABus.Resources, facp: FACP?) {
+        print("i8042:", pnpName, resources)
         super.init()
 
         // 1. Flush output buffer
@@ -278,11 +279,11 @@ final class KBD8042: Device, ISADevice, CustomStringConvertible {
     }
 
 
-    public var keyboardDevice: Keyboard? {
-        if let kbd = port1device as? Keyboard {
+    public var keyboardDevice: (Device & Keyboard)? {
+        if let kbd = port1device as? (Device & Keyboard) {
             return kbd
         }
-        if let kbd = port2device as? Keyboard {
+        if let kbd = port2device as? (Device & Keyboard) {
             return kbd
         }
         return nil

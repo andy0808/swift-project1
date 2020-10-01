@@ -1,7 +1,7 @@
 /*
  * klibc/malloc.c
  *
- * Copyright © 2015 - 2017 Simon Evans. All rights reserved.
+ * Copyright © 2015 - 2018 Simon Evans. All rights reserved.
  *
  * Simple memory management for now just enough to provide a simple malloc()
  *
@@ -17,14 +17,14 @@
  * Any allocations over 4032 bytes just get rounded up to a page size and
  * allocated from the free pages.
  *
- * realloc() isnt currently implemented as it is not needed at the moment.
  * No stats have been gathered to optimise this allocator in anyway its just
  * bare minimum to get everything else working. Anyway, the C++ string
  * libraries that use it do their own realloc routing (malloc/free/computing
- * best next size)
+ * best next size).
  *
  */
 
+#define DEBUG 0
 #include <stdatomic.h>
 #include <assert.h>
 #include "klibc.h"
@@ -270,6 +270,8 @@ add_new_slab(int slab_idx)
         }
         slabs[slab_idx] = slab;
 
+        slab->malloc_cnt = 0;
+        slab->free_cnt = 0;
 #ifdef MALLOC_DEBUG
         strcpy(slab->signature, "#MALLOC");      // for debugging
         update_checksum(slab);
@@ -326,6 +328,7 @@ void *
 malloc(size_t size)
 {
         void *retval = NULL;
+        debugf("malloc(%ld)\n", size);
         if (sizeof(struct slab_header) != PAGE_SIZE) {
                 koops("slab_header is %lu bytes", sizeof(struct slab_header));
         }
@@ -347,6 +350,7 @@ malloc(size_t size)
                 result->region_size = (pages * PAGE_SIZE) - sizeof(struct malloc_region);
                 debugf("Wanted %lu got %lu\n", size, result->region_size);
                 retval = result->data;
+                memset(retval, 0x0, result->region_size);
         } else {
                 int slab_idx = map_size_to_idx(size);
                 struct slab_header *slab = slabs[slab_idx];
@@ -370,6 +374,7 @@ malloc(size_t size)
                 clear_bitmap_entry(slab, freebit);
                 slab->malloc_cnt++;
                 update_checksum(slab);
+                memset(retval, 0xAA, slab->slab_size);
                 debugf("malloc(%lu)=%p slab=%p offset=%lx [%u/%u] freebit=%d bm=%16.16lx %16.16lx\n",
                        size, retval, slab, offset, slab->malloc_cnt, slab->free_cnt, freebit,
                        slab->allocation_bm[1], slab->allocation_bm[0]);
@@ -440,7 +445,7 @@ free(void *ptr)
 
 
 size_t
-malloc_usable_size(const void *ptr)
+malloc_usable_size(void * _Nullable ptr)
 {
         size_t retval = 0;
 
@@ -473,4 +478,33 @@ malloc_usable_size(const void *ptr)
 
         load_eflags(flags);
         return retval;
+}
+
+
+void *
+realloc(void *ptr, size_t size)
+{
+        if (ptr == NULL) {
+                return malloc(size);
+        }
+        if (size == 0) {
+                free(ptr);
+                return NULL;
+        }
+        size_t current_size = malloc_usable_size(ptr);
+        if (size <= current_size) {
+                return ptr;
+        }
+        void *new = malloc(size);
+        memcpy(new, ptr, current_size);
+        return new;
+}
+
+
+int
+posix_memalign(void **memptr, size_t alignment, size_t size)
+{
+        void *mem = malloc(size);
+        *memptr = mem;
+        return 0;
 }

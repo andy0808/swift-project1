@@ -2,7 +2,7 @@
 //  kernel/klib/printf.swift
 //
 //  Created by Simon Evans on 21/04/2017.
-//  Copyright © 2017 Simon Evans. All rights reserved.
+//  Copyright © 2017 - 2018 Simon Evans. All rights reserved.
 //
 //  Simple printf implementation.
 
@@ -61,7 +61,7 @@
 //    PRECISION is NOT SUPPORTED
 //    CONV defines how to treat the argument, it can be one of:
 //
-//          'd', 'i'	A signed decimal integer.
+//          'd', 'i'    A signed decimal integer.
 //          'u'         An unsigned decimal integer.
 //          'b'         Unsigned binary integer.
 //          'o'         Unsigned octal integer.
@@ -78,10 +78,6 @@
 // TODO:  Implement precision and 's' format character
 // FIXME: Pointers are not properly supported but could possibly be by using
 //        the CVarArg protocol which converts select items to an Int
-
-#if TEST
-import Darwin
-#endif
 
 
 // A simpler iterator for both an array or arguments and a
@@ -139,12 +135,12 @@ protocol UnicodeOutputStream : TextOutputStream {
 
 
 extension String: UnicodeOutputStream {
-     mutating func write(_ unicodeScalar: UnicodeScalar) {
+    mutating func write(_ unicodeScalar: UnicodeScalar) {
         self += String(unicodeScalar)
     }
 }
 
-#if KERNEL
+#if !TEST
 @inline(never)
 func printf(_ format: StaticString, _ arg1: Any) {
     var output = _tty()
@@ -171,7 +167,36 @@ func printf(_ format: StaticString, _ items: Any...) {
     var iterator = ArgIterator(args: items)
     _printf(to: &output, format: format, itemsIterator: &iterator)
 }
-#endif
+
+
+func serialPrintf(_ format: StaticString, _ items: Any...) {
+    var output = _serial()
+    var iterator = ArgIterator(args: items)
+    _printf(to: &output, format: format, itemsIterator: &iterator)
+}
+
+
+// Specialised versions of kprintf() than can be used when malloc() should not
+// be called. The arguments are Int/UInt not CVarArg as the latter will involve
+// metadata cache lookup that then calls malloc().
+@inline(__always)
+func kprintf(_ format: StaticString, _ arg1: Int) {
+    _ = format.utf8Start.withMemoryRebound(to: Int8.self, capacity: format.utf8CodeUnitCount) {
+        (ptr: UnsafePointer<Int8>) -> Int32 in
+        kprintf1arg(ptr, arg1)
+    }
+}
+
+
+@inline(__always)
+func kprintf(_ format: StaticString, _ arg1: UInt) {
+    _ = format.utf8Start.withMemoryRebound(to: Int8.self, capacity: format.utf8CodeUnitCount) {
+        (ptr: UnsafePointer<Int8>) -> Int32 in
+        kprintf1arg(ptr, Int(bitPattern: arg1))
+    }
+}
+
+#endif  // !TEST
 
 
 // Calling printf with just a format string and no arguments is inefficient,

@@ -2,7 +2,7 @@
 //  kernel/devices/acpi/amltype1opcodes.swift
 //
 //  Created by Simon Evans on 25/11/2017.
-//  Copyright © 2017 Simon Evans. All rights reserved.
+//  Copyright © 2017 - 2019 Simon Evans. All rights reserved.
 //
 //  ACPI Type 1 Opcodes
 
@@ -11,6 +11,7 @@ protocol AMLType1Opcode: AMLTermObj {
 }
 
 extension AMLType1Opcode {
+    // FIXME - this should be removed when all type1 opcodes implemented
     func execute(context: inout ACPI.AMLExecutionContext) throws {
         throw AMLError.unimplemented("\(type(of: self))")
     }
@@ -112,7 +113,11 @@ struct AMLDefNotify: AMLType1Opcode {
 
 struct AMLDefRelease: AMLType1Opcode {
     // ReleaseOp MutexObject
-    let object: AMLMutexObject
+    let mutex: AMLMutexObject
+
+    func execute(context: inout ACPI.AMLExecutionContext) throws {
+        print("Releasing Mutex:", mutex)
+    }
 }
 
 

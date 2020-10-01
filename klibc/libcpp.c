@@ -53,6 +53,7 @@ void _ZdaPv(void *this)
         free(this);
 }
 
+
 // std::__throw_length_error(char const*)
 void
 _ZSt20__throw_length_errorPKc(char const *error)
@@ -74,6 +75,14 @@ void
 _ZSt17__throw_bad_allocv()
 {
         koops("Bad Alloc");
+}
+
+
+// std::__throw_bad_function_call()
+void
+_ZSt25__throw_bad_function_callv()
+{
+        koops("bad function call");
 }
 
 
@@ -113,6 +122,12 @@ __cxa_demangle(const char *mangled_name, char * output_buffer,
 }
 
 
+void
+__cxa_pure_virtual()
+{
+        koops("__cxa_pure_virtual");
+}
+
 // std::ios_base::Init::Init()
 void
 _ZNSt8ios_base4InitC1Ev()
@@ -130,4 +145,14 @@ int _ZNSt6thread20hardware_concurrencyEv()
 
 
 UNIMPLEMENTED(_ZNSt8ios_base4InitD1Ev) // std::ios_base::Init::~Init()
-UNIMPLEMENTED(_ZNKSt8__detail20_Prime_rehash_policy14_M_need_rehashEmmm)
+
+// std::__detail::_Prime_rehash_policy::_M_need_rehash(unsigned long, unsigned long, unsigned long) const
+
+struct rehash_pair { size_t first; size_t second; }
+_ZNKSt8__detail20_Prime_rehash_policy14_M_need_rehashEmmm(
+        unsigned long bucket_count, unsigned long element_count, unsigned long load)
+{
+        // TODO: Fix this correclty
+        struct rehash_pair pair = { 0, 0x12345678 };
+        return pair;
+}

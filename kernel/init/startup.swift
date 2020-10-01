@@ -29,15 +29,10 @@ final class System {
         // Setup GDT/IDT as early as possible to help catch CPU exceptions
         setupGDT()
         setupIDT()
-
+        CPU.getInfo()
         // BootParams must come first to find memory regions for MM
         bootParams = parse(bootParamsAddr: VirtualAddress(bootParamsAddr))
         setupMM(bootParams: bootParams)
-
-        symbolLookupInit(symbolTablePtr: bootParams.symbolTablePtr,
-                         symbolTableSize: bootParams.symbolTableSize,
-                         stringTablePtr: bootParams.stringTablePtr,
-                         stringTableSize: bootParams.stringTableSize)
 
         // SystemTables() needs the MM setup so that the memory can be mapped
         systemTables = SystemTables(bootParams: bootParams)
@@ -45,6 +40,9 @@ final class System {
             $0.type == MemoryType.Conventional
         }
         addPagesToFreePageList(freeMemoryRanges)
+        // symbolLookupInit uses a sort() so may require more free memory, do it after all the free
+        // RAM has been added to the free list.
+        symbolLookupInit(bootParams: bootParams)
         deviceManager = DeviceManager(acpiTables: systemTables.acpiTables)
     }
 
@@ -52,6 +50,10 @@ final class System {
         CPU.getInfo()
         TTY.sharedInstance.setTTY(frameBufferInfo: bootParams.frameBufferInfo)
         deviceManager.initialiseDevices()
+
+        // gitBuildVersion defined in kernel/init/version.swift, created
+        // by kernel/Makefile
+        print("Version: \(gitBuildVersion)\n")
     }
 
 
@@ -86,35 +88,10 @@ fileprivate func keyboardInput() {
     // Try reading from the keyboard otherwise just pause forever
     // (used for testing on macbook where there is no PS/2 keyboard)
 
-    // gitBuildVersion defined in kernel/init/version.swift, created
-    // by kernel/Makefile
-    print("Version: \(gitBuildVersion)\n")
-
-    _keyboardInput()
+    commandShell()
     print("No keyboard!")
 
     while true {
         hlt()
-    }
-}
-
-
-// If a keyboard is present, wait and read from it, looping indefinitely
-fileprivate func _keyboardInput() {
-    guard let kbd = system.deviceManager.keyboard else {
-        return
-    }
-
-    let tty = TTY.sharedInstance
-
-    print("> ", terminator: "")
-    while true {
-        while let char = kbd.readKeyboard() {
-            if char.isASCII {
-                tty.printChar(CChar(truncatingIfNeeded: char.value))
-            } else {
-                print("\(char) is not ASCII\n")
-            }
-        }
     }
 }

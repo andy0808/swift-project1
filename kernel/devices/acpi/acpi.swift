@@ -43,101 +43,116 @@ struct ACPI_SDT: CustomStringConvertible {
     }
 
 
-    init(ptr: UnsafePointer<acpi_sdt_header>) {
+    init(ptr: UnsafeRawPointer) {
         signature = String(ptr, maxLength: 4)
-        length = ptr.pointee.length
-        revision = ptr.pointee.revision
-        checksum = ptr.pointee.checksum
+        let header = ptr.load(as: acpi_sdt_header.self)
+        length = header.length
+        revision = header.revision
+        checksum = header.checksum
         oemId = String(ptr.advanced(by: 10), maxLength: 6)
         oemTableId = String(ptr.advanced(by: 16), maxLength: 8)
-        oemRev = ptr.pointee.oem_revision
+        oemRev = header.oem_revision
         creatorId = String(ptr.advanced(by: 28), maxLength: 4)
-        creatorRev = ptr.pointee.creator_rev
-    }
-}
-
-
-struct RSDP1: CustomStringConvertible {
-    let signature: String
-    let checksum:  UInt8
-    let oemId:     String
-    let revision:  UInt8
-    let rsdtAddr:  UInt32
-    var rsdt:      UInt { return UInt(rsdtAddr) }
-
-    var description: String {
-        return "ACPI: \(signature): \(oemId): rev: \(revision) "
-            + "ptr: \(asHex(rsdt))"
-    }
-
-
-    init(ptr: UnsafePointer<rsdp1_header>) {
-        signature = String(ptr, maxLength: 8)
-        checksum = ptr.pointee.checksum
-        oemId = String(ptr.advanced(by: 9), maxLength: 6)
-        revision = ptr.pointee.revision
-        rsdtAddr = ptr.pointee.rsdt_addr
-    }
-}
-
-
-struct RSDP2: CustomStringConvertible {
-    let signature: String
-    let checksum:  UInt8
-    let oemId:     String
-    let revision:  UInt8
-    let rsdtAddr:  UInt32
-    let length:    UInt32
-    let xsdtAddr:  UInt64
-    let checksum2: UInt8
-    var rsdt:      UInt {
-        return (xsdtAddr != 0) ? UInt(xsdtAddr) : UInt(rsdtAddr)
-    }
-
-    var description: String {
-        return "ACPI: \(signature): \(oemId): rev: \(revision) "
-            + "ptr: \(asHex(rsdt))"
-    }
-
-
-    init(ptr: UnsafePointer<rsdp2_header>) {
-        signature = String(ptr, maxLength: 8)
-        checksum = ptr.pointee.rsdp1.checksum
-        oemId = String(ptr.advanced(by: 9), maxLength: 6)
-        revision = ptr.pointee.rsdp1.revision
-        rsdtAddr = ptr.pointee.rsdp1.rsdt_addr
-        length = ptr.pointee.length
-        xsdtAddr = ptr.pointee.xsdt_addr
-        checksum2 = ptr.pointee.checksum
+        creatorRev = header.creator_rev
     }
 }
 
 
 final class ACPI {
+
+
+    struct RSDT {
+        let entries: [PhysAddress]
+
+        init(_ rawPtr: UnsafeRawPointer) {
+            guard let table = ACPI.validateHeader(rawSDTPtr: rawPtr), table.signature == "RSDT" else {
+                fatalError("Invalid RSDT table")
+            }
+            let entryCount = (Int(table.length) - MemoryLayout<acpi_sdt_header>.size) / 4
+            let buffer = UnsafeBufferPointer(start: rawPtr.advanced(by: MemoryLayout<acpi_sdt_header>.size)
+                .bindMemory(to: UInt32.self, capacity: entryCount), count: entryCount)
+            entries = buffer.map { PhysAddress(RawAddress($0)) }
+        }
+    }
+
+
+    struct XSDT {
+        let entries: [PhysAddress]
+
+        init(_ rawPtr: UnsafeRawPointer) {
+            guard let table = ACPI.validateHeader(rawSDTPtr: rawPtr), table.signature == "XSDT" else {
+                fatalError("Invalid XSDT table")
+            }
+            let entryCount = (Int(table.length) - MemoryLayout<acpi_sdt_header>.size) / 8
+            let buffer = UnsafeBufferPointer(start: rawPtr.advanced(by: MemoryLayout<acpi_sdt_header>.size)
+                .bindMemory(to: UInt64.self, capacity: entryCount), count: entryCount)
+            entries = buffer.map { PhysAddress(RawAddress($0)) }
+        }
+    }
+
+
+    struct RSDP {
+        let revision: Int
+        let rsdtAddress: UInt32
+        let xsdtAddress: UInt64
+
+        init(_ rawPtr: UnsafeRawPointer) {
+            let sig = String(rawPtr, maxLength: 8)
+            guard sig == "RSD PTR " else {
+                fatalError("findRSRT invalid sig")
+            }
+
+            let rsdp1 = rawPtr.load(as: rsdp1_header.self)
+            revision = Int(rsdp1.revision)
+
+            if rsdp1.revision == 2 {
+                // ACPI 2.0 RSDP
+
+                let rsdp2 = rawPtr.load(as: rsdp2_header.self)
+                rsdtAddress = rsdp2.rsdp1.rsdt_addr
+                xsdtAddress = rsdp2.xsdt_addr
+            } else {
+                rsdtAddress = rsdp1.rsdt_addr
+                xsdtAddress = 0
+                //let csum = checksum(UnsafePointer<UInt8>(rsdpPtr),
+                //size: strideof(RSDP1))
+            }
+        }
+
+        func rsdt() -> RSDT? {
+            guard rsdtAddress != 0 else { return nil }
+            return RSDT(PhysAddress(RawAddress(rsdtAddress)).rawPointer)
+        }
+
+        func xsdt() -> XSDT? {
+            guard xsdtAddress != 0 else { return nil }
+            return XSDT(PhysAddress(RawAddress(xsdtAddress)).rawPointer)
+        }
+    }
+
+
     private(set) var mcfg: MCFG?
     private(set) var facp: FACP?
     private(set) var madt: MADT?
-    private(set) var globalObjects: ACPIGlobalObjects!
+    private(set) var globalObjects: ACPIObjectNode!
     private(set) var tables: [ACPITable] = []
     private var dsdt: AMLByteBuffer?
     private var ssdts: [AMLByteBuffer] = []
 
-
     init?(rsdp: UnsafeRawPointer, vendor: String, product: String) {
-        let rsdtPtr = findRSDT(rsdp)
-        guard let entries = sdtEntries32(rsdtPtr) else {
-            print("ACPI: Cant find any entries")
+        let rsdp = RSDP(rsdp)
+
+        guard let entries = rsdp.xsdt()?.entries ?? rsdp.rsdt()?.entries else {
+            print("Cant find a XSDT or RSDT")
             return nil
         }
-
         for entry in entries {
-            let rawSDTPtr = mkSDTPtr(PhysAddress(RawAddress(entry)))
-            parseEntry(rawSDTPtr: rawSDTPtr, vendor: vendor, product: product)
+            parseEntry(rawSDTPtr: entry.rawPointer, vendor: vendor, product: product)
         }
 
         if dsdt == nil, let dsdtAddr = facp?.dsdtAddress {
             print("Found DSDT address in FACP: 0x\(asHex(dsdtAddr.value))")
-            parseEntry(rawSDTPtr: mkSDTPtr(dsdtAddr),
+            parseEntry(rawSDTPtr: dsdtAddr.rawPointer,
                        vendor: vendor, product: product)
         }
     }
@@ -155,7 +170,7 @@ final class ACPI {
         }
         ssdts.insert(ptr, at: 0) // Put the DSDT first
 
-        let acpiGlobalObjects = ACPIGlobalObjects()
+        let acpiGlobalObjects = ACPI.ACPIObjectNode.createGlobalObjects()
         let parser = AMLParser(globalObjects: acpiGlobalObjects)
         do {
             for buffer in ssdts {
@@ -183,8 +198,8 @@ final class ACPI {
             return
         }
 
-
-        guard let header = validateHeader(rawSDTPtr: rawSDTPtr) else {
+        guard let header = ACPI.validateHeader(rawSDTPtr: rawSDTPtr) else {
+            print("Header for \(signature) failed to validate")
             return
         }
 
@@ -193,6 +208,9 @@ final class ACPI {
         case "MCFG":
             mcfg = MCFG(rawSDTPtr, vendor: vendor, product: product)
             tables.append(mcfg!)
+            for entry in mcfg!.allocations {
+                print("MCFG:", entry)
+            }
 
         case "FACP":
             facp = FACP(rawSDTPtr)
@@ -232,7 +250,6 @@ final class ACPI {
             let totalLength = Int(header.length)
             let amlCodeLength = totalLength - headerLength
             let amlCodePtr = rawSDTPtr.advanced(by: headerLength)
-                .bindMemory(to: UInt8.self, capacity: amlCodeLength)
             let amlByteBuffer = AMLByteBuffer(start: amlCodePtr,
                                               count: amlCodeLength)
             if header.signature == "DSDT" {
@@ -248,29 +265,25 @@ final class ACPI {
 
 
     private func tableSignature(ptr: UnsafeRawPointer) -> String {
-        let table = ptr.bindMemory(to: UInt8.self, capacity: 4)
         var signature = ""
         for idx in 0...3 {
-            let byte: UInt8 = table.advancedBy(bytes: idx).pointee
-            let ch = UnicodeScalar(byte)
-            ch.write(to: &signature)
+            let byte = ptr.load(fromByteOffset: idx, as: UInt8.self)
+            signature += String(UnicodeScalar(byte))
         }
         return signature
     }
 
 
-    private func validateHeader(rawSDTPtr: UnsafeRawPointer) -> ACPI_SDT? {
+    static private func validateHeader(rawSDTPtr: UnsafeRawPointer) -> ACPI_SDT? {
         let headerLength = MemoryLayout<acpi_sdt_header>.size
-        let ptr = rawSDTPtr.bindMemory(to: acpi_sdt_header.self,
-                                       capacity: 1)
-        let header = ACPI_SDT(ptr: ptr)
+        let header = ACPI_SDT(ptr: rawSDTPtr)
         let totalLength = Int(header.length)
 
         guard totalLength > headerLength else {
-            print("ACPI: Entry @ 0x\(asHex(rawSDTPtr.address)) has total length of\(totalLength)")
+            print("ACPI: Entry @ 0x\(asHex(rawSDTPtr.address)) has total length of \(totalLength)")
             return nil
         }
-        guard checksum(ptr, size: Int(ptr.pointee.length)) == 0 else {
+        guard checksum(rawSDTPtr, size: Int(header.length)) == 0 else {
             print("ACPI: \(header.signature) has bad chksum")
             return nil
         }
@@ -278,55 +291,13 @@ final class ACPI {
     }
 
 
-    private func checksum(_ rawPtr: UnsafeRawPointer, size: Int) -> UInt8 {
-        let ptr = rawPtr.bindMemory(to: UInt8.self, capacity: size)
-        let region = UnsafeBufferPointer(start: ptr, count: size)
+    static private func checksum(_ rawPtr: UnsafeRawPointer, size: Int) -> UInt8 {
+        let region = UnsafeRawBufferPointer(start: rawPtr, count: size)
         var csum: UInt8 = 0
         for x in region {
             csum = csum &+ x
         }
 
         return csum
-    }
-
-
-    private func mkSDTPtr(_ address: PhysAddress) -> UnsafeRawPointer {
-        return UnsafeRawPointer(bitPattern: address.vaddr)!
-    }
-
-
-    private func sdtEntries32(_ rawPtr: UnsafeRawPointer) -> UnsafeBufferPointer<UInt32>? {
-        let ptr = rawPtr.bindMemory(to: acpi_sdt_header.self, capacity: 1)
-        let entryCount = (Int(ptr.pointee.length) - MemoryLayout<acpi_sdt_header>.stride) / MemoryLayout<UInt32>.size
-
-        if entryCount > 0 {
-            let entryPtr: UnsafePointer<UInt32> =
-                UnsafePointer(bitPattern: ptr.advanced(by: 1).address)!
-            return UnsafeBufferPointer(start: entryPtr, count: entryCount)
-        } else {
-            return nil
-        }
-    }
-
-
-    private func findRSDT(_ rawPtr: UnsafeRawPointer) -> UnsafeRawPointer {
-        var rsdtAddr = RawAddress(0)
-
-        let rsdpPtr = rawPtr.bindMemory(to: rsdp1_header.self, capacity: 1)
-
-        if rsdpPtr.pointee.revision == 1 {
-            let rsdp2Ptr = rawPtr.bindMemory(to: rsdp2_header.self, capacity: 1)
-            rsdtAddr = RawAddress(rsdp2Ptr.pointee.xsdt_addr)
-            if rsdtAddr == 0 {
-                rsdtAddr = RawAddress(rsdp2Ptr.pointee.rsdp1.rsdt_addr)
-            }
-            //let csum = checksum(UnsafePointer<UInt8>(rsdp2Ptr),
-            // size: strideof(RSDP2))
-        } else {
-            rsdtAddr = RawAddress(rsdpPtr.pointee.rsdt_addr)
-            //let csum = checksum(UnsafePointer<UInt8>(rsdpPtr),
-            //size: strideof(RSDP1))
-        }
-        return mkSDTPtr(PhysAddress(rsdtAddr))
     }
 }

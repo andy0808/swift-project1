@@ -38,12 +38,17 @@ enum MemoryType: UInt32 {
 
 let kb: UInt = 1024
 let mb: UInt = 1048576
+let gb = kb * mb
 
 struct MemoryRange: CustomStringConvertible {
     let type: MemoryType
     let start: PhysAddress
     let size: UInt
     var endAddress: PhysAddress { return start.advanced(by: size - 1) }
+
+    var physPageRanges: [PhysPageRange] {
+        return PhysPageRange.createRanges(startAddress: start, size: size, pageSizes: [PAGE_SIZE])
+    }
 
     var description: String {
         let str = (size >= mb) ? String.sprintf(" %6uMB  ", size / mb) :
@@ -103,9 +108,9 @@ protocol BootParams {
     var source: String { get }
     var frameBufferInfo: FrameBufferInfo? { get }
     var kernelPhysAddress: PhysAddress { get }
-    var symbolTablePtr: UnsafePointer<Elf64_Sym> { get }
+    var symbolTablePtr: UnsafePointer<Elf64_Sym>? { get }
     var symbolTableSize: UInt64 { get }
-    var stringTablePtr: UnsafePointer<CChar> { get }
+    var stringTablePtr: UnsafePointer<CChar>? { get }
     var stringTableSize: UInt64 { get }
     func findTables() -> (UnsafePointer<rsdp1_header>?,
         UnsafePointer<smbios_header>?)
@@ -127,7 +132,7 @@ func parse(bootParamsAddr: VirtualAddress) -> BootParams {
     guard let signature = readSignature(bootParamsAddr) else {
         koops("bootparams: Cant find boot params signature")
     }
-    print("bootparams: signature: \(signature)");
+    print("bootparams: signature:", signature)
 
     if (signature == "BIOS") {
         print("bootparams: Found BIOS boot params")
@@ -179,7 +184,7 @@ struct SystemTables {
 
 func readSignature(_ address: VirtualAddress) -> String? {
     let signatureSize = 8
-    let membuf = MemoryBufferReader(address, size: signatureSize)
+    var membuf = MemoryBufferReader(address, size: signatureSize)
     guard let sig = try? membuf.readASCIIZString(maxSize: signatureSize) else {
         return nil
     }

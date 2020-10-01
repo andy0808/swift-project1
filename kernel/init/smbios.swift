@@ -41,7 +41,7 @@ struct SMBIOS {
         let type: UInt8
         let length: UInt8
         let handle: UInt16
-        let data: MemoryBufferReader
+        var data: MemoryBufferReader
         let strings: [String]
 
         var description: String {
@@ -55,14 +55,14 @@ struct SMBIOS {
                 return nil
             }
             let index = Int(offset) - 4
-            if let idx: UInt8 = try? data.readAtIndex(index) {
+            do {
+                let idx: UInt8 = try data.readAtIndex(index)
                 let stringId = Int(idx)
                 guard stringId > 0 && stringId <= strings.count else {
                     return nil
                 }
-
                 return strings[stringId - 1]
-            } else {
+            } catch {
                 print("SMBIOS: error reading id")
                 return nil
             }
@@ -109,11 +109,10 @@ struct SMBIOS {
             + "@ \(asHex(tableAddress)) size: \(tableLength)")
 
         func str(_ a: String?) -> String {
-            return a == nil ? "nil" : a!
+            return a ?? "nil"
         }
 
         for entry in parseTables() {
-            //print("SMBIOS:", entry)
             switch entry.type {
 
             case 0:     // BIOS information
@@ -167,7 +166,7 @@ struct SMBIOS {
         var entries: [SMBiosEntry] = []
         entries.reserveCapacity(entryCount)
 
-        let buffer = MemoryBufferReader(tableAddress, size: tableLength)
+        var buffer = MemoryBufferReader(tableAddress, size: tableLength)
         for _ in 1...entryCount {
             do {
                 let type: UInt8 = try buffer.read()
@@ -178,7 +177,7 @@ struct SMBIOS {
                     continue
                 }
                 let data = buffer.subBufferAtOffset(buffer.offset, size: tableLength)
-                let stringTable = buffer.subBufferAtOffset(buffer.offset + tableLength)
+                var stringTable = buffer.subBufferAtOffset(buffer.offset + tableLength)
                 let terminator: UInt16 = try stringTable.read()
                 var strings: [String] = []
                 if terminator != 0 {

@@ -2,7 +2,7 @@
 //  kernel/devices/acpi/amlmethod.swift
 //
 //  Created by Simon Evans on 12/05/2017.
-//  Copyright © 2017 Simon Evans. All rights reserved.
+//  Copyright © 2017 - 2019 Simon Evans. All rights reserved.
 //
 //  ACPI method invocation
 
@@ -12,10 +12,10 @@ extension ACPI {
     struct AMLExecutionContext {
         let scope: AMLNameString
         let args: AMLTermArgList
-        let globalObjects: ACPIGlobalObjects
+        var localObjects: [AMLTermArg?]
         var endOfMethod = false
-
         private var _returnValue: AMLTermArg? = nil
+
         var returnValue: AMLTermArg? {
             mutating get {
                 let ret = _returnValue
@@ -26,61 +26,67 @@ extension ACPI {
                 _returnValue = newValue
             }
         }
-        var localObjects: [AMLTermArg?] = Array(repeatElement(nil, count: 8))
 
 
-        init(scope: AMLNameString, args: AMLTermArgList,
-             globalObjects: ACPIGlobalObjects) {
+        init(scope: AMLNameString, args: AMLTermArgList = []) {
             self.scope = scope
             self.args = args
-            self.globalObjects = globalObjects
+            self.localObjects = Array(repeatElement(nil, count: 8))
         }
+
+
+        private init(scope: AMLNameString, args: AMLTermArgList, localObjects: [AMLTermArg?]) {
+            self.scope = scope
+            self.args = args
+            self.localObjects = localObjects
+        }
+
 
         func withNewScope(_ newScope: AMLNameString) -> AMLExecutionContext {
-            return AMLExecutionContext(scope: newScope, args: [], globalObjects: globalObjects)
+            return AMLExecutionContext(scope: newScope, args: self.args, localObjects: self.localObjects)
         }
 
+
         mutating func execute(termList: AMLTermList) throws {
+            var dynamicNamedObjects: [AMLNamedObj] = []
+            defer {
+                for object in dynamicNamedObjects.reversed() {
+                    object.parent!.removeChildNode(object.name)
+                }
+            }
             for termObj in termList {
                 if let op = termObj as? AMLType2Opcode {
                     // FIXME, should something be done with the result or maybe it should
                     // only be returned in the context
-                    _ = try op.execute(context: &self)
+                    _ = op.evaluate(context: &self)
                 } else if let op = termObj as? AMLType1Opcode {
                     try op.execute(context: &self)
                 } else if let op = termObj as? AMLNamedObj {
                     try op.createNamedObject(context: &self)
+                    dynamicNamedObjects.append(op)
                 } else if let op = termObj as? AMLNameSpaceModifierObj {
                     try op.execute(context: &self)
+                } else if let defFields = termObj as? AMLDefField {
+                    // AMLDefField isnt a named object but rather holds a list of AMLNamedObj
+                    for object in defFields.fields {
+                        try object.createNamedObject(context: &self)
+                        dynamicNamedObjects.append(object)
+                    }
+                }
+                else if let indexFields = termObj as? AMLDefIndexField {
+                    // AMLDefIndexField isnt a named object but rather holds a list of AMLNamedObj
+                    for object in indexFields.fields {
+                        try object.createNamedObject(context: &self)
+                        dynamicNamedObjects.append(object)
+                    }
                 } else {
-                    fatalError("Unknown op: \(type(of: termObj))")
+                    fatalError("Unknown op: \(termObj) in scope \(self.scope)")
                 }
                 if endOfMethod {
                     return
                 }
             }
         }
-    }
-
-
-    func invokeMethod(name: String, _ args: Any...) throws -> AMLTermArg? {
-        var methodArgs: AMLTermArgList = []
-        for arg in args {
-            if let arg = arg as? String {
-                methodArgs.append(AMLString(arg))
-            } else if let arg = arg as? AMLInteger {
-                methodArgs.append(AMLIntegerData(AMLInteger(arg)))
-            } else {
-                throw AMLError.invalidData(reason: "Bad data: \(arg)")
-            }
-        }
-        let mi = try AMLMethodInvocation(method: AMLNameString(name),
-                                         args: methodArgs)
-        var context = AMLExecutionContext(scope: mi.method,
-                                          args: [],
-                                          globalObjects: globalObjects)
-
-        return try mi.execute(context: &context)
     }
 
 

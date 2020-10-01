@@ -11,11 +11,19 @@
 #include <stdint.h>
 #include "klibc.h"
 #include "x86defs.h"
+#include "swift.h"
 
 
 extern void *_kernel_stack;
 extern void *_stack_start;
 static const int max_depth = 128;
+
+// Simple function that can be used as a debugger breakpoint.
+__attribute__((noinline))
+void debugger_hook()
+{
+  asm volatile ("rdtsc" : : : "memory");
+}
 
 
 void
@@ -26,7 +34,8 @@ koops(const char *fmt, ...)
         kvprintf(fmt, args);
         kprintf("\n");
         va_end(args);
-        __builtin_trap();
+        debugger_hook();
+        stop();
 }
 
 
@@ -103,7 +112,7 @@ stack_trace(uintptr_t rsp, uintptr_t rbp)
                 if (idx >= max_depth) {
                         // temporary safety check
                         kprintf("Exceeded depth of %d\n", max_depth);
-                        return;
+                        debugger_hook();
                 }
         }
 }
